@@ -195,7 +195,7 @@ Preference order: `PI_BAR_PROGRESS_MODEL` → saved pi-bar `progressModel` → p
 
 Other pi extensions can publish small status badges. Pi-bar displays their text as written, without prepending internal keys: `setStatus("mcp", "MCP: 2/2 servers")` appears as `MCP: 2/2 servers`, not `mcp:MCP: 2/2 servers`. Extensions should publish self-describing text; pi-bar does not guess labels for bare values.
 
-Pi-bar strips embedded terminal colors and control sequences, and separates each badge with the same `❯` divider used by other footer segments. Keys remain available for filtering and identification. Open `/bar` → `Choose badges`, or use the shortcut:
+Pi-bar preserves extension-provided ANSI text colors and styles (including truecolor, such as pi-token-speed's speed colors), while removing non-styling terminal controls. Styles are reset around each badge so backgrounds or attributes cannot leak into dividers, neighboring badges, or overflow counts. Each badge uses the same `❯` divider as other footer segments. Keys remain available for filtering and identification. Open `/bar` → `Choose badges`, or use the shortcut:
 
 ```text
 /bar badges

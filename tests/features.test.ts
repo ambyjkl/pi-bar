@@ -35,7 +35,10 @@ after(() => {
 type Command = Parameters<ExtensionAPI["registerCommand"]>[1];
 type Handler = (event: never, ctx: ExtensionContext) => unknown;
 
-function harness(initialEntries: SessionEntry[] = [], statuses = new Map<string, string>()) {
+function harness(initialEntries: SessionEntry[] = [], statuses = new Map<string, string>(), theme = {
+	fg: (_color: string, text: string) => text,
+	bold: (text: string) => text,
+}) {
 	const handlers = new Map<string, Handler>();
 	let command: Command;
 	let footer: (Component & { dispose?(): void }) | undefined;
@@ -47,7 +50,6 @@ function harness(initialEntries: SessionEntry[] = [], statuses = new Map<string,
 	let sessionId = "test-session";
 	let contextUsage: ContextUsage | undefined = { tokens: 24_000, percent: 12, contextWindow: 200_000 };
 	const notifications: string[] = [];
-	const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
 	const tui = { requestRender() {} };
 	const ctx = {
 		cwd: directory,
@@ -239,6 +241,26 @@ test("Show provider is available in the existing configurator and saves immediat
 	assert.equal(h.render(), "test-model");
 	h.input("\x1b");
 	await opened;
+	await h.shutdown();
+});
+
+test("pi-token-speed colors survive footer theming and update without styling neighboring badges", async () => {
+	process.env.PI_BAR_SHOW = "extensions";
+	const reset = "\x1b[0m";
+	const theme = {
+		fg: (color: string, text: string) => color === "text" ? `\x1b[36m${text}\x1b[39m` : `\x1b[2m${text}\x1b[22m`,
+		bold: (text: string) => text,
+	};
+	const statuses = new Map([["speed", ""], ["plan", "Ready"]]);
+	const h = harness([], statuses, theme);
+	await h.start();
+	for (const color of ["255;0;0", "0;255;0"]) {
+		const tps = `\x1b[2mTPS:\x1b[22m \x1b[38;2;${color}m42.0 tok/s\x1b[39m`;
+		statuses.set("speed", tps);
+		assert.equal(h.render(), `${reset}${tps}${reset}  ${theme.fg("dim", "❯")}  ${theme.fg("text", "Ready")}`);
+		assert.equal(h.render(22), `${reset}${tps}${reset} ${theme.fg("dim", "❯")} +1`);
+	}
+	assert.equal(h.contextReads(), 0, "colored status redraws must not query hidden context");
 	await h.shutdown();
 });
 

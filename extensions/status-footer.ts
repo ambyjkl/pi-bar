@@ -1574,52 +1574,111 @@ function skipEscapeSequence(text: string, escapeIndex: number): number {
 		case 0x5e: // PM: ESC ^
 		case 0x5f: // APC: ESC _
 			return skipStringControl(text, escapeIndex + 2);
-		default:
-			if (
-				nextCode === 0x20 ||
-				nextCode === 0x23 ||
-				nextCode === 0x25 ||
-				(nextCode >= 0x28 && nextCode <= 0x2f)
-			) {
-				return Math.min(text.length, escapeIndex + 3);
-			}
-			return Math.min(text.length, escapeIndex + 2);
+		default: {
+			// Generic ESC sequences may contain several intermediate bytes.
+			let end = escapeIndex + 1;
+			while (text.charCodeAt(end) >= 0x20 && text.charCodeAt(end) <= 0x2f) end++;
+			const final = text.charCodeAt(end);
+			return final >= 0x30 && final <= 0x7e ? end + 1 : end;
+		}
 	}
 }
 
-function stripTerminalControls(text: string): string {
+const SGR_RESET = "\x1b[0m";
+const COLOR_SGR_CODES = new Set([38, 48, 58]);
+
+function isColorByte(value: string | undefined): boolean {
+	return value !== undefined && /^\d+$/u.test(value) && Number(value) <= 255;
+}
+
+/** Validate styling, not merely a CSI final 'm' (mouse reports also end in 'm'). */
+function isSafeSgr(parameters: string): boolean {
+	if (!/^[\d;:]*$/u.test(parameters)) return false;
+	const fields = parameters.split(";");
+	for (let index = 0; index < fields.length; index++) {
+		const field = fields[index];
+		if (field.includes(":")) {
+			const [code, mode, ...channels] = field.split(":");
+			if (code === "4" && channels.length === 0 && /^[0-5]$/u.test(mode)) continue;
+			if (!COLOR_SGR_CODES.has(Number(code))) return false;
+			if (mode === "5" && channels.length === 1 && isColorByte(channels[0])) continue;
+			if (mode !== "2") return false;
+			// ISO RGB accepts an omitted/default color-space field, or no field.
+			if (channels.length === 4 && (channels[0] === "" || /^0+$/u.test(channels[0]))) channels.shift();
+			if (channels.length !== 3 || !channels.every(isColorByte)) return false;
+			continue;
+		}
+		const code = field === "" ? 0 : Number(field);
+		if (COLOR_SGR_CODES.has(code)) {
+			const mode = fields[index + 1];
+			const length = mode === "5" ? 1 : mode === "2" ? 3 : 0;
+			if (!length) return false;
+			for (let channel = 0; channel < length; channel++) {
+				if (!isColorByte(fields[index + 2 + channel])) return false;
+			}
+			index += 1 + length;
+			continue;
+		}
+		if (!((code >= 0 && code <= 37) || code === 39 || (code >= 40 && code <= 47) ||
+			(code >= 49 && code <= 55) || (code >= 59 && code <= 65) ||
+			(code >= 73 && code <= 75) || (code >= 90 && code <= 97) ||
+			(code >= 100 && code <= 107))) return false;
+	}
+	return true;
+}
+
+function sanitizeTerminalText(text: string, preserveSgr: boolean): string {
 	let stripped = "";
+	let hasText = false;
+	let hasSgr = false;
+	let pendingSpace = false;
+	let afterSpaceStyles = "";
 	for (let index = 0; index < text.length; ) {
 		const code = text.charCodeAt(index);
 
-		if (code === ESC_BYTE) {
-			index = skipEscapeSequence(text, index);
+		if (code === ESC_BYTE || code === 0x9b) {
+			const start = code === 0x9b ? index + 1 : text[index + 1] === "[" ? index + 2 : undefined;
+			const end = code === 0x9b ? skipCsiSequence(text, index + 1) : skipEscapeSequence(text, index);
+			if (preserveSgr && start !== undefined && text[end - 1] === "m") {
+				const parameters = text.slice(start, end - 1);
+				if (isSafeSgr(parameters)) {
+					const sgr = `\x1b[${parameters}m`;
+					if (pendingSpace) afterSpaceStyles += sgr;
+					else stripped += sgr;
+					hasSgr = true;
+				}
+			}
+			index = end;
 			continue;
 		}
-		if (code === 0x9b) {
-			index = skipCsiSequence(text, index + 1);
-			continue;
-		}
-		if (
-			code === 0x90 ||
-			code === 0x98 ||
-			code === 0x9d ||
-			code === 0x9e ||
-			code === 0x9f
-		) {
+		if (code === 0x90 || code === 0x98 || code === 0x9d || code === 0x9e || code === 0x9f) {
 			index = skipStringControl(text, index + 1);
 			continue;
 		}
-		if (isControlCharacter(code)) {
-			if (isWhitespaceControl(code)) stripped += " ";
+		if (isWhitespaceControl(code) || /\s/u.test(text[index])) {
+			pendingSpace = hasText;
 			index++;
 			continue;
 		}
-
-		stripped += text[index];
-		index++;
+		if (isControlCharacter(code)) {
+			index++;
+			continue;
+		}
+		// Treat styling as zero-width while trimming/collapsing visible whitespace.
+		if (pendingSpace) stripped += ` ${afterSpaceStyles}`;
+		pendingSpace = false;
+		afterSpaceStyles = "";
+		hasText = true;
+		stripped += text[index++];
 	}
-	return stripped.replace(/\s+/gu, " ").trim();
+	if (!hasText) return "";
+	stripped += afterSpaceStyles;
+	// Isolate all styles, including an extension's unclosed background/bold.
+	return hasSgr ? `${SGR_RESET}${stripped}${SGR_RESET}` : stripped;
+}
+
+function stripTerminalControls(text: string): string {
+	return sanitizeTerminalText(text, false);
 }
 
 // Second layer: strip leaked prompt scaffolding such as "Through activity 12:".
@@ -1814,12 +1873,13 @@ export function formatExtensionStatuses(
 	seenStatusKeys: Set<string>,
 ): string[] | null {
 	const parts = Array.from(statuses.entries())
-		.filter(([, text]) => stripTerminalControls(text).trim().length > 0)
+		.map(([key, text]) => [key, sanitizeTerminalText(text, true)] as const)
+		.filter(([, text]) => text.length > 0)
 		.filter(([key]) => {
 			seenStatusKeys.add(key);
 			return shouldShowStatus(key, filter);
 		})
-		.map(([, text]) => stripTerminalControls(text));
+		.map(([, text]) => text);
 
 	return parts.length > 0 ? parts : null;
 }
@@ -2582,7 +2642,7 @@ export default function (pi: ExtensionAPI) {
 					};
 					return [layoutFooter(
 						visibleSegments.map((name) => ({ name, ...renderers[name] })),
-						(extensionStatusParts ?? []).map((part) => theme.fg("text", part)),
+						(extensionStatusParts ?? []).map((part) => part.startsWith(SGR_RESET) ? part : theme.fg("text", part)),
 						width,
 						theme.fg("dim", SEGMENT_SEPARATOR),
 					)];
