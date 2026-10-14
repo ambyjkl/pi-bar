@@ -38,6 +38,7 @@ import {
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import { FooterUsageTracker, hasUsage, PROGRESS_USAGE_ENTRY_TYPE, totalsFromUsage } from "./usage.js";
+import { FooterContextUsageCache } from "./context-usage.js";
 
 type SegmentName = "model" | "thinking" | "context" | "cache_hit_ratio" | "cost" | "tokens" | "cwd" | "progress" | "extensions";
 type StatusFilter =
@@ -2017,7 +2018,9 @@ export default function (pi: ExtensionAPI) {
 		stripTerminalControls(currentStatuses.get(key) ?? "") || "No current status text";
 	const refresh = () => requestRender?.();
 	const usageTracker = new FooterUsageTracker();
+	const contextUsageCache = new FooterContextUsageCache();
 	const syncUsage = (ctx: ExtensionContext, restoreBranch = false) => {
+		contextUsageCache.reset();
 		usageTracker.syncEntries(ctx.sessionManager.getEntries());
 		if (restoreBranch) usageTracker.restoreBranch(ctx.sessionManager.getBranch());
 	};
@@ -2457,14 +2460,17 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.on("model_select", async () => refresh());
+	pi.on("model_select", async () => { contextUsageCache.reset(); refresh(); });
 	pi.on("thinking_level_select", async () => refresh());
+	// A routed model can change its limits before a new entry is persisted.
+	pi.on("message_start", async () => { contextUsageCache.reset(); refresh(); });
 	// message_end runs before persistence and allows later handlers to replace
 	// usage. Read finalized entries at the synchronized lifecycle boundaries.
 	pi.on("turn_end", async (_event, ctx) => { syncUsage(ctx); refresh(); });
 	pi.on("agent_end", async (_event, ctx) => { syncUsage(ctx); refresh(); });
 	pi.on("session_compact", async (_event, ctx) => { syncUsage(ctx); refresh(); });
 	pi.on("before_agent_start", async (event, ctx) => {
+		contextUsageCache.reset();
 		if (visibleSegments.includes("progress")) progress.recordUserMessage(ctx, event.prompt);
 	});
 	pi.on("message_update", async (event, ctx) => {
@@ -2479,6 +2485,7 @@ export default function (pi: ExtensionAPI) {
 		if (visibleSegments.includes("progress")) progress.recordToolResult(ctx, event);
 	});
 	pi.on("message_end", async (event, ctx) => {
+		contextUsageCache.reset();
 		if (visibleSegments.includes("progress")) progress.recordMessageEnd(ctx, event.message);
 		refresh();
 	});
@@ -2532,7 +2539,7 @@ export default function (pi: ExtensionAPI) {
 						statusFilter,
 						seenStatusKeys,
 					);
-					const usage = ctx.getContextUsage();
+					const usage = visibleSegments.includes("context") ? contextUsageCache.get(ctx) : undefined;
 					const contextSegmentColor = contextColor(
 						usage?.percent,
 						warningThreshold,
@@ -2588,6 +2595,7 @@ export default function (pi: ExtensionAPI) {
 		sessionOpen = false;
 		completionModelRegistry = undefined;
 		sessionEpoch++;
+		contextUsageCache.reset();
 		progress.shutdown();
 		if (ctx.hasUI) ctx.ui.setFooter(undefined);
 	});

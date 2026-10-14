@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { setImmediate as nextTick } from "node:timers/promises";
 import { after, beforeEach, test } from "node:test";
 import { createAssistantMessageEventStream, registerApiProvider, unregisterApiProviders, type Model } from "@earendil-works/pi-ai";
-import { initTheme, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type SessionEntry } from "@earendil-works/pi-coding-agent";
+import { initTheme, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type ContextUsage, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { CombinedAutocompleteProvider, type Component } from "@earendil-works/pi-tui";
 import { PROGRESS_USAGE_ENTRY_TYPE } from "../extensions/usage.ts";
 import { assistant, makeUsage, messageEntry, summaryEntry } from "./fixtures.ts";
@@ -43,6 +43,9 @@ function harness(initialEntries: SessionEntry[] = [], statuses = new Map<string,
 	let entries = [...initialEntries];
 	let branch = entries;
 	let reads = 0;
+	let contextReads = 0;
+	let sessionId = "test-session";
+	let contextUsage: ContextUsage | undefined = { tokens: 24_000, percent: 12, contextWindow: 200_000 };
 	const notifications: string[] = [];
 	const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
 	const tui = { requestRender() {} };
@@ -50,9 +53,12 @@ function harness(initialEntries: SessionEntry[] = [], statuses = new Map<string,
 		cwd: directory,
 		mode: "tui",
 		hasUI: true,
-		model: { id: "test-model", provider: "test-provider" },
-		getContextUsage: () => ({ percent: 12, contextWindow: 200_000 }),
+		model: { id: "test-model", provider: "test-provider", contextWindow: 200_000 },
+		getContextUsage: () => { contextReads++; return contextUsage; },
 		sessionManager: {
+			getSessionId: () => sessionId,
+			getLeafId: () => branch.at(-1)?.id ?? null,
+			getEntryCount: () => entries.length,
 			getEntries: () => { reads++; return [...entries]; },
 			getBranch: () => { reads++; return [...branch]; },
 		},
@@ -93,8 +99,10 @@ function harness(initialEntries: SessionEntry[] = [], statuses = new Map<string,
 		input: (data: string) => custom!.handleInput!(data),
 		entries: () => entries,
 		setBranch: (next: SessionEntry[]) => { branch = [...next]; },
-		replaceSession: (next: SessionEntry[]) => { entries = [...next]; branch = entries; },
+		replaceSession: (next: SessionEntry[]) => { sessionId += "-new"; entries = [...next]; branch = entries; },
 		reads: () => reads,
+		contextReads: () => contextReads,
+		setContextUsage: (next: ContextUsage | undefined) => { contextUsage = next; },
 	};
 }
 
@@ -231,6 +239,95 @@ test("Show provider is available in the existing configurator and saves immediat
 	assert.equal(h.render(), "test-model");
 	h.input("\x1b");
 	await opened;
+	await h.shutdown();
+});
+
+test("context usage is cached across animation frames, status changes, and resizes", async () => {
+	process.env.PI_BAR_SHOW = "context,extensions";
+	const h = harness();
+	await h.start();
+	assert.equal(h.render(), "12.0% / 200k");
+	const historyReads = h.reads();
+	for (let frame = 0; frame < 1_000; frame++) {
+		h.statuses.set("speed", `${frame} TPS`);
+		h.render(frame % 241);
+	}
+	assert.equal(h.contextReads(), 1, "unchanged frames must not rebuild context");
+	assert.equal(h.reads(), historyReads, "cache validation must not copy session history");
+	await h.shutdown();
+});
+
+test("hidden context never queries usage and enabling it reads the current value", async () => {
+	process.env.PI_BAR_SHOW = "model";
+	const h = harness();
+	await h.start();
+	for (let frame = 0; frame < 100; frame++) h.render();
+	assert.equal(h.contextReads(), 0);
+	h.setContextUsage({ tokens: 50_000, percent: 25, contextWindow: 200_000 });
+	await h.command("show context");
+	assert.match(h.render(), /25\.0% \/ 200k/);
+	assert.equal(h.contextReads(), 1);
+	await h.shutdown();
+});
+
+test("context cache follows persisted leaves, branches, session identity, and model limits", async () => {
+	process.env.PI_BAR_SHOW = "context";
+	const first = messageEntry("first", assistant(makeUsage()));
+	const h = harness([first]);
+	await h.start();
+	assert.equal(h.render(), "12.0% / 200k");
+	await h.emit("message_end", { message: first.message });
+	assert.equal(h.render(), "12.0% / 200k", "message_end precedes persistence");
+	h.entries().push(messageEntry("second", assistant(makeUsage())));
+	h.setContextUsage({ tokens: 50_000, percent: 25, contextWindow: 200_000 });
+	assert.equal(h.render(), "25.0% / 200k", "a persisted leaf invalidates without another event");
+	h.setBranch([first]);
+	h.setContextUsage({ tokens: 10_000, percent: 5, contextWindow: 200_000 });
+	assert.equal(h.render(), "5.0% / 200k", "same entry count, different branch");
+
+	Object.assign(h.ctx, { model: { id: "other", provider: "test-provider", contextWindow: 1_000_000 } });
+	h.setContextUsage({ tokens: 10_000, percent: 1, contextWindow: 1_000_000 });
+	assert.equal(h.render(), "1.0% / 1.0M", "model changes without a leaf append");
+	Object.assign(h.ctx.model!, { contextWindow: 500_000 });
+	h.setContextUsage({ tokens: 10_000, percent: 2, contextWindow: 500_000 });
+	assert.equal(h.render(), "2.0% / 500k", "in-place model limit changes");
+
+	h.replaceSession([first]);
+	h.setContextUsage({ tokens: 20_000, percent: 4, contextWindow: 500_000 });
+	assert.equal(h.render(), "4.0% / 500k", "new session with a reused leaf ID");
+	await h.shutdown();
+});
+
+test("context cache refreshes at lifecycle boundaries and retains unknown compaction usage", async () => {
+	process.env.PI_BAR_SHOW = "context";
+	const h = harness();
+	await h.start();
+	assert.equal(h.render(), "12.0% / 200k");
+	for (const name of ["model_select", "message_start", "turn_end", "agent_end", "session_tree"]) {
+		h.setContextUsage({ tokens: 40_000, percent: 20, contextWindow: 200_000 });
+		const before = h.contextReads();
+		await h.emit(name);
+		assert.equal(h.render(), "20.0% / 200k", name);
+		assert.equal(h.contextReads(), before + 1, name);
+		h.render();
+		assert.equal(h.contextReads(), before + 1, `${name}: following redraw is cached`);
+	}
+	h.setContextUsage({ tokens: null, percent: null, contextWindow: 200_000 });
+	await h.emit("session_compact");
+	assert.equal(h.render(), "—% / 200k");
+	const before = h.contextReads();
+	for (let frame = 0; frame < 100; frame++) h.render();
+	assert.equal(h.contextReads(), before, "null tokens are a cacheable result, not missing data");
+	h.setContextUsage(undefined);
+	await h.emit("turn_end");
+	assert.equal(h.render(), "—");
+	const unavailableReads = h.contextReads();
+	h.render();
+	assert.equal(h.contextReads(), unavailableReads, "undefined usage must also be cached");
+	await h.shutdown();
+	await h.start();
+	h.render();
+	assert.equal(h.contextReads(), unavailableReads + 1, "session restart clears the cache");
 	await h.shutdown();
 });
 

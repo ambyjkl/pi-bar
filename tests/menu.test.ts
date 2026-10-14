@@ -44,7 +44,7 @@ function harness(statuses = new Map<string, string>()) {
 		cwd: directory, mode: "tui", hasUI: true,
 		model: { provider: "test-provider", id: "test-model" },
 		getContextUsage: () => undefined,
-		sessionManager: { getEntries: () => [], getBranch: () => [] },
+		sessionManager: { getSessionId: () => "test-session", getLeafId: () => null, getEntries: () => [], getBranch: () => [] },
 		modelRegistry: { getAvailable: () => [] },
 		ui: {
 			notify: (message: string, type: string) => notifications.push({ message, type }),

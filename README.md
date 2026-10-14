@@ -17,7 +17,7 @@ claude-opus-4.7  ❯  med  ❯  2.6% / 1.0M  ❯  Reviewing package structure  �
 
 - **See the active model at a glance** — catch accidental model switches before an expensive or sensitive task starts.
 - **Track thinking level in place** — immediately notice when you are using the wrong reasoning setting.
-- **Watch context pressure early** — context usage turns green, yellow, then red as you approach the limit.
+- **Watch context pressure early** — context usage turns green, yellow, then red as you approach the limit. Context usage is cached across redraws and resizes, refreshed when the session/branch or model changes, and never queried while the context segment is hidden.
 - **Follow what pi is doing** — a one-line progress update keeps the current task visible without scrolling.
 - **Keep extension statuses visible** — statuses other extensions set still appear in the footer.
 
