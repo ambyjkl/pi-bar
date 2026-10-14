@@ -999,7 +999,9 @@ class FooterProgressEngine {
 
 	// Custom messages (e.g. subagent results handed back to the main session via
 	// sendMessage with triggerTurn) also start a run, so reset progress the same
-	// way a user turn does.
+	// way a user turn does. A text-less custom message (empty or image-only
+	// content) still resets the turn — a blank footer is preferable to stale
+	// progress from the previous run — it just records no activity.
 	recordCustomMessage(ctx: ExtensionContext, message: unknown): void {
 		this.beginUserTurn(ctx);
 		const activity = this.facts.recordCustomMessage(message);
@@ -2511,7 +2513,13 @@ export default function (pi: ExtensionAPI) {
 			progress.recordCustomMessage(ctx, record.message);
 			return;
 		}
-		progress.recordUserMessage(ctx, record.prompt ?? "");
+		if (typeof record.prompt === "string") {
+			progress.recordUserMessage(ctx, record.prompt);
+			return;
+		}
+		// Future event variants without a prompt still start a fresh run; they just
+		// have no user text to record.
+		progress.beginUserTurn(ctx);
 	});
 	pi.on("message_update", async (event, ctx) => {
 		if (visibleSegments.includes("progress")) progress.recordAssistantUpdate(ctx, event.message);
