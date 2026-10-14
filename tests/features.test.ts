@@ -376,6 +376,30 @@ test("failed and aborted progress calls still count their reported usage", async
 	}
 });
 
+test("custom before_agent_start events (subagent handoffs) record progress without a prompt", async (t) => {
+	process.env.PI_BAR_SHOW = "cost,tokens,progress";
+	const h = harness();
+	const pending = fakeProgressProvider(h);
+	t.after(async () => { await h.shutdown(); unregisterApiProviders("pi-bar-tests"); });
+	await h.start();
+	// Newer pi fires before_agent_start with messageType "custom" (carrying a message,
+	// no prompt) when sendMessage(..., { triggerTurn: true }) starts a run — e.g. a
+	// subagent result handed back to the main session. This must not throw and must
+	// still trigger a progress request.
+	await h.emit("before_agent_start", {
+		messageType: "custom",
+		message: { customType: "subagent_result", content: "Subagent finished: edited 3 files", display: true },
+	});
+	await waitFor(() => pending.length === 1);
+	pending.shift()!("stop");
+	// A following user prompt still records normally.
+	await h.emit("before_agent_start", { prompt: "Follow-up request" });
+	await waitFor(() => pending.length === 1);
+	pending.shift()!("stop");
+	await nextTick();
+	assert.doesNotMatch(h.render(), /undefined|NaN/);
+});
+
 test("late progress responses cannot write into a replacement session", async (t) => {
 	process.env.PI_BAR_SHOW = "cost,tokens,progress";
 	const h = harness();
