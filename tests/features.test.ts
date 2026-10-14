@@ -404,6 +404,7 @@ test("custom before_agent_start events (subagent handoffs) record progress witho
 	await waitFor(() => pending.length === 1);
 	assert.match(JSON.stringify(requests.at(-1)), /custom \(subagent_result\): Array content result/);
 	pending.shift()!("stop");
+	await waitFor(() => h.render().includes("Reviewing footer metrics"));
 
 	// A text-less custom message (image-only content) resets the turn but sends no
 	// progress request.
@@ -411,6 +412,13 @@ test("custom before_agent_start events (subagent handoffs) record progress witho
 		messageType: "custom",
 		message: { customType: "subagent_result", content: [{ type: "image", data: "aGk=", mimeType: "image/png" }], display: true },
 	});
+	for (let tick = 0; tick < 10; tick++) await nextTick();
+	assert.equal(pending.length, 0);
+	assert.doesNotMatch(h.render(), /Reviewing footer metrics/, "text-less custom messages clear the previous run's progress");
+
+	// Unknown future event variants without a prompt also reset the turn without
+	// recording an empty user activity or requesting progress.
+	await h.emit("before_agent_start", { messageType: "other" });
 	for (let tick = 0; tick < 10; tick++) await nextTick();
 	assert.equal(pending.length, 0);
 
