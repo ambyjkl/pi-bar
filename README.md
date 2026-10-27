@@ -40,7 +40,7 @@ If pi is already running after install, reload resources:
 The footer adapts to terminal width without extra configuration:
 
 - **Model, thinking level, and context percentage take priority.**
-- Separators have two spaces on each side by default, for a roomier display.
+- Separators have two spaces on each side by default, for a roomier display. Change the glyph and spacing in `/bar` → `Separator` and `Separator spacing`.
 - Progress text shrinks first. If space is still tight, separator padding reduces to one space per side before compacting content. CWD then compacts from its preferred path to `parent/project`, then `project`; context window size is omitted when needed. An enabled provider prefix can yield before the model name is clipped.
 - Optional token totals, cost, and cache-hit ratio yield whole under width pressure, before overflowing extension badges. Numeric metrics are never shown partially.
 - Extension badges stay in their published order. Badges that cannot fit are hidden whole, with `+N` showing how many are behind the overflow. Open `/bar badges` to inspect their text and visibility by key.
@@ -119,6 +119,19 @@ The cap must be an integer of at least 8; invalid values use 36. Very long direc
 
 This is Pi's session working directory (`ctx.cwd`), not a live shell directory: `cd` inside a tool command does not change it. Visibility persists through the existing `/bar` configuration.
 
+### Change the separator
+
+Open `/bar` and set:
+
+- **Separator**: the text between footer items, up to 8 terminal columns. Enter saves; an empty value removes the glyph so only spacing separates items. Control characters are rejected.
+- **Separator spacing**: spaces on each side of the separator, from 0 to 4 (default 2). With an empty separator, spacing is the whole gap between items.
+
+Tight layouts still reduce spacing to one space per side before compacting content. Choices save to `separator` and `separatorSpacing` in `~/.pi/agent/pi-bar.json` (or `PI_BAR_CONFIG`).
+
+```text
+claude-opus-4.7   |   med   |   2.6% / 1.0M
+```
+
 ### Show the model provider
 
 Provider prefixes are hidden by default. Enable `Show provider` in `/bar`, or use:
@@ -195,7 +208,7 @@ Preference order: `PI_BAR_PROGRESS_MODEL` → saved pi-bar `progressModel` → p
 
 Other pi extensions can publish small status badges. Pi-bar displays their text as written, without prepending internal keys: `setStatus("mcp", "MCP: 2/2 servers")` appears as `MCP: 2/2 servers`, not `mcp:MCP: 2/2 servers`. Extensions should publish self-describing text; pi-bar does not guess labels for bare values.
 
-Pi-bar preserves extension-provided ANSI text colors and styles (including truecolor, such as pi-token-speed's speed colors), while removing non-styling terminal controls. Styles are reset around each badge so backgrounds or attributes cannot leak into dividers, neighboring badges, or overflow counts. Each badge uses the same `❯` divider as other footer segments. Keys remain available for filtering and identification. Open `/bar` → `Choose badges`, or use the shortcut:
+Pi-bar preserves extension-provided ANSI text colors and styles (including truecolor, such as pi-token-speed's speed colors), while removing non-styling terminal controls. Styles are reset around each badge so backgrounds or attributes cannot leak into dividers, neighboring badges, or overflow counts. Each badge uses the same separator as other footer segments. Keys remain available for filtering and identification. Open `/bar` → `Choose badges`, or use the shortcut:
 
 ```text
 /bar badges
