@@ -31,6 +31,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
 	Container,
+	Input,
 	type AutocompleteItem,
 	type SettingItem,
 	SettingsList,
@@ -52,6 +53,8 @@ type GlobalBarConfig = {
 	segments?: SegmentName[];
 	showProvider?: boolean;
 	progressModel?: string;
+	separator?: string;
+	separatorSpacing?: number;
 };
 type ProgressActivityType =
 	| "user_message"
@@ -177,6 +180,9 @@ const DEFAULT_WARNING_THRESHOLD = 70;
 const DEFAULT_ERROR_THRESHOLD = 90;
 
 const SEGMENT_SEPARATOR = "❯";
+const DEFAULT_SEPARATOR_SPACING = 2;
+const MAX_SEPARATOR_SPACING = 4;
+const MAX_SEPARATOR_WIDTH = 8;
 
 function formatTokens(n: number): string {
 	if (n >= 1_000_000) {
@@ -209,6 +215,16 @@ export function parseCwdMaxWidth(raw: string | undefined): number {
 	const value = raw?.trim() ?? "";
 	const width = /^\d+$/.test(value) ? Number(value) : NaN;
 	return Number.isSafeInteger(width) && width >= 8 ? width : DEFAULT_CWD_MAX_WIDTH;
+}
+
+/** Empty is allowed (spacing only). Control characters and text wider than the cap are rejected. */
+export function parseSeparatorText(raw: unknown): string | undefined {
+	if (typeof raw !== "string" || /[\x00-\x1f\x7f-\x9f]/.test(raw)) return undefined;
+	return visibleWidth(raw) <= MAX_SEPARATOR_WIDTH ? raw : undefined;
+}
+
+export function parseSeparatorSpacing(raw: unknown): number | undefined {
+	return typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0 && raw <= MAX_SEPARATOR_SPACING ? raw : undefined;
 }
 
 /** Format the session directory, preserving the leaf when middle components fit poorly. */
@@ -273,10 +289,16 @@ export function layoutFooter(
 	badges: readonly string[],
 	width: number,
 	divider = SEGMENT_SEPARATOR,
+	spacing = DEFAULT_SEPARATOR_SPACING,
 ): string {
 	if (!Number.isFinite(width) || width < 1) return "";
 	width = Math.floor(width);
-	let separator = `  ${divider}  `;
+	// Spacing pads both sides of a glyph; with no glyph, it is the whole gap.
+	const joiner = (padding: number) => {
+		const pad = " ".repeat(padding);
+		return divider ? `${pad}${divider}${pad}` : pad;
+	};
+	let separator = joiner(spacing);
 	const items = segments.map((segment) => ({ ...segment }));
 	const extensions = items.find((item) => item.name === "extensions");
 	let shownBadges = badges.length;
@@ -311,7 +333,7 @@ export function layoutFooter(
 	// Keep the roomy default while progress alone can absorb width pressure.
 	// Tighten gaps before compacting paths/context or overflowing whole badges.
 	if (overflow() > 0) {
-		separator = ` ${divider} `;
+		separator = joiner(Math.min(spacing, 1));
 		updateBadges();
 	}
 	for (const name of ["cwd", "context", "thinking", "model"] as const) {
@@ -2004,6 +2026,8 @@ function readGlobalConfig(): GlobalBarConfig {
 			segments: parseSerializedSegments(data.segments) ?? undefined,
 			showProvider: typeof data.showProvider === "boolean" ? data.showProvider : undefined,
 			progressModel: parseSerializedProgressModel(data.progressModel),
+			separator: parseSeparatorText(data.separator),
+			separatorSpacing: parseSeparatorSpacing(data.separatorSpacing),
 		};
 	} catch {
 		return {};
@@ -2121,6 +2145,14 @@ export default function (pi: ExtensionAPI) {
 	let statusFilter: StatusFilter = { mode: "all", hidden: new Set() };
 	let visibleSegments: SegmentName[] = readGlobalSegments() ?? DEFAULT_SEGMENTS;
 	let showProvider = readGlobalConfig().showProvider ?? false;
+	let separatorText = SEGMENT_SEPARATOR;
+	let separatorSpacing = DEFAULT_SEPARATOR_SPACING;
+	const loadSeparatorConfig = () => {
+		const config = readGlobalConfig();
+		separatorText = config.separator ?? SEGMENT_SEPARATOR;
+		separatorSpacing = config.separatorSpacing ?? DEFAULT_SEPARATOR_SPACING;
+	};
+	loadSeparatorConfig();
 	const seenStatusKeys = new Set<string>();
 	let currentStatuses: ReadonlyMap<string, string> = new Map();
 	let completionModelRegistry: ExtensionContext["modelRegistry"] | undefined;
@@ -2166,6 +2198,32 @@ export default function (pi: ExtensionAPI) {
 	const persistStatusFilter = () => {
 		writeGlobalStatusFilter(statusFilter);
 		refresh();
+	};
+	const setSeparator = (value: string, ctx: ExtensionContext): boolean => {
+		const text = parseSeparatorText(value);
+		if (text === undefined) return false;
+		try {
+			writeGlobalConfig({ ...readGlobalConfig(), separator: text });
+		} catch {
+			ctx.ui.notify("Could not save the separator. Check pi-bar config file permissions; separator unchanged.", "error");
+			return false;
+		}
+		separatorText = text;
+		refresh();
+		return true;
+	};
+	const setSeparatorSpacing = (value: number, ctx: ExtensionContext): boolean => {
+		const spacing = parseSeparatorSpacing(value);
+		if (spacing === undefined) return false;
+		try {
+			writeGlobalConfig({ ...readGlobalConfig(), separatorSpacing: spacing });
+		} catch {
+			ctx.ui.notify("Could not save the separator spacing. Check pi-bar config file permissions; spacing unchanged.", "error");
+			return false;
+		}
+		separatorSpacing = spacing;
+		refresh();
+		return true;
 	};
 	const setShowProvider = (value: boolean) => {
 		showProvider = value;
@@ -2270,6 +2328,33 @@ export default function (pi: ExtensionAPI) {
 			handleInput(data: string) { settings.handleInput(data); },
 		};
 	};
+	const displaySeparator = (text: string) => (text === "" ? "(none)" : text);
+	const createSeparatorEditor = (ctx: ExtensionContext, close: (value?: string) => void) => {
+		const theme = savedSettingsTheme("go back");
+		const input = new Input({ prompt: "Separator: ", placeholder: "empty for none" });
+		input.setValue(separatorText);
+		input.handleInput("\x05"); // ctrl+e: put the cursor after the current glyph
+		input.focused = true;
+		input.onSubmit = (value) => {
+			if (parseSeparatorText(value) === undefined) {
+				ctx.ui.notify(`Separator must be at most ${MAX_SEPARATOR_WIDTH} columns with no control characters.`, "warning");
+				return;
+			}
+			close(value);
+		};
+		input.onEscape = () => close();
+		return {
+			render(width: number) {
+				return [
+					theme.hint("Text shown between footer items. Enter saves; empty shows no separator. Esc cancels."),
+					"",
+					...input.render(Math.max(8, width)),
+				];
+			},
+			invalidate() { input.invalidate(); },
+			handleInput(data: string) { input.handleInput(data); },
+		};
+	};
 	const openSettings = async (ctx: ExtensionContext) => {
 		if (ctx.mode !== "tui") {
 			ctx.ui.notify("/bar settings requires TUI mode", "warning");
@@ -2311,6 +2396,22 @@ export default function (pi: ExtensionAPI) {
 				});
 				return group;
 			});
+			items.push(
+				{
+					id: "separator",
+					label: "Separator",
+					description: `Text between footer items, up to ${MAX_SEPARATOR_WIDTH} columns. Empty shows none.`,
+					currentValue: displaySeparator(separatorText),
+					submenu: (_currentValue, close) => createSeparatorEditor(ctx, close),
+				},
+				{
+					id: "separator-spacing",
+					label: "Separator spacing",
+					description: `Spaces on each side of the separator (0-${MAX_SEPARATOR_SPACING}). Tight layouts use at most one.`,
+					currentValue: String(separatorSpacing),
+					values: Array.from({ length: MAX_SEPARATOR_SPACING + 1 }, (_, index) => String(index)),
+				},
+			);
 			const container = new Container();
 			container.addChild(new (class {
 				render(_width: number) {
@@ -2326,6 +2427,10 @@ export default function (pi: ExtensionAPI) {
 				if (id === "progress-model") {
 					setProgressModel(value, ctx);
 					settings.updateValue(id, formatProgressModelKey(resolveProgressModelPreference(ctx.cwd)));
+				} else if (id === "separator") {
+					if (setSeparator(value, ctx)) settings.updateValue(id, displaySeparator(separatorText));
+				} else if (id === "separator-spacing") {
+					setSeparatorSpacing(Number(value), ctx);
 				} else if (id === "show-provider") {
 					setShowProvider(value === "shown");
 				} else if (id.startsWith("segment:")) {
@@ -2623,6 +2728,7 @@ export default function (pi: ExtensionAPI) {
 		else progress.shutdown();
 		restoreStatusFilter(ctx);
 		showProvider = readGlobalConfig().showProvider ?? false;
+		loadSeparatorConfig();
 		syncUsage(ctx, true);
 		refresh();
 	});
@@ -2637,6 +2743,7 @@ export default function (pi: ExtensionAPI) {
 		seenStatusKeys.clear();
 		visibleSegments = readGlobalSegments() ?? DEFAULT_SEGMENTS;
 		showProvider = readGlobalConfig().showProvider ?? false;
+		loadSeparatorConfig();
 		if (visibleSegments.includes("progress")) progress.startSession(ctx.cwd);
 		else progress.shutdown();
 		restoreStatusFilter(ctx);
@@ -2710,7 +2817,8 @@ export default function (pi: ExtensionAPI) {
 						visibleSegments.map((name) => ({ name, ...renderers[name] })),
 						(extensionStatusParts ?? []).map((part) => part.startsWith(SGR_RESET) ? part : theme.fg("text", part)),
 						width,
-						theme.fg("dim", SEGMENT_SEPARATOR),
+						theme.fg("dim", separatorText),
+						separatorSpacing,
 					)];
 				},
 			};
